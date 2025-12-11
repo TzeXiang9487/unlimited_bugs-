@@ -6,6 +6,29 @@ header('Content-Type: application/json');
 $json_file = 'movie_data.json';
 
 /**
+ * Convert YouTube watch URL to embed URL
+ */
+function convertToEmbedUrl($url) {
+    // If it's already an embed URL, return as is
+    if (strpos($url, 'youtube.com/embed/') !== false) {
+        return $url;
+    }
+    
+    // Convert youtu.be short URLs
+    if (preg_match('/youtu\.be\/([a-zA-Z0-9_-]+)/', $url, $matches)) {
+        return "https://www.youtube.com/embed/" . $matches[1];
+    }
+    
+    // Convert watch URLs
+    if (preg_match('/youtube\.com\/watch\?v=([a-zA-Z0-9_-]+)/', $url, $matches)) {
+        return "https://www.youtube.com/embed/" . $matches[1];
+    }
+    
+    // If it doesn't match any pattern, return original
+    return $url;
+}
+
+/**
  * Reads movie data from the JSON file.
  * @param string $file The path to the JSON file.
  * @return array The decoded movie data array, or an empty array on error.
@@ -27,8 +50,8 @@ function read_movies($file) {
  * @return bool True on success, false on failure.
  */
 function write_movies($file, $data) {
-    // Encode data with pretty printing for readability
-    $json_data = json_encode($data, JSON_PRETTY_PRINT);
+    // Encode data with pretty printing for readability and unescaped slashes
+    $json_data = json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     // Write content, using LOCK_EX to prevent concurrent write issues
     return file_put_contents($file, $json_data, LOCK_EX) !== false;
 }
@@ -65,14 +88,17 @@ switch ($method) {
             exit;
         }
 
-// Add the new movie data
-$movies[$title] = [
-    'description' => $input['description'],
-    'trailer' => $input['trailer'],
-    'image' => $input['image'],
-    'rating' => isset($input['rating']) ? floatval($input['rating']) : null,
-    'labels' => isset($input['labels']) ? array_map('trim', explode(',', $input['labels'])) : []
-];
+        // Convert YouTube URL to embed format
+        $embed_trailer = convertToEmbedUrl($input['trailer']);
+
+        // Add the new movie data
+        $movies[$title] = [
+            'description' => $input['description'],
+            'trailer' => $embed_trailer,
+            'image' => $input['image'],
+            'rating' => isset($input['rating']) ? floatval($input['rating']) : null,
+            'labels' => isset($input['labels']) ? array_map('trim', explode(',', $input['labels'])) : []
+        ];
 
         // Save the updated list
         if (write_movies($json_file, $movies)) {
@@ -111,6 +137,61 @@ $movies[$title] = [
         } else {
             http_response_code(500); // Internal Server Error
             echo json_encode(['status' => 'error', 'message' => 'Failed to save data after deletion. Check file permissions.']);
+        }
+        break;
+
+    case 'PUT':
+        // --- UPDATE Operation ---
+        $movies = read_movies($json_file);
+        $input = json_decode(file_get_contents('php://input'), true);
+        
+        // Validate required fields
+        if (!isset($input['original_title'], $input['title'], $input['description'], $input['trailer'], $input['image'])) {
+            http_response_code(400);
+            echo json_encode(['status' => 'error', 'message' => 'Missing required fields.']);
+            exit;
+        }
+        
+        $originalTitle = trim($input['original_title']);
+        $newTitle = trim($input['title']);
+        
+        // Check if original movie exists
+        if (!isset($movies[$originalTitle])) {
+            http_response_code(404);
+            echo json_encode(['status' => 'error', 'message' => "Movie '{$originalTitle}' not found."]);
+            exit;
+        }
+        
+        // If title changed, check if new title already exists
+        if ($originalTitle !== $newTitle && isset($movies[$newTitle])) {
+            http_response_code(409);
+            echo json_encode(['status' => 'error', 'message' => "Movie '{$newTitle}' already exists."]);
+            exit;
+        }
+        
+        // Convert YouTube URL to embed format
+        $embed_trailer = convertToEmbedUrl($input['trailer']);
+        
+        // Remove old entry if title changed
+        if ($originalTitle !== $newTitle) {
+            unset($movies[$originalTitle]);
+        }
+        
+        // Update movie data
+        $movies[$newTitle] = [
+            'description' => $input['description'],
+            'trailer' => $embed_trailer,
+            'image' => $input['image'],
+            'rating' => isset($input['rating']) ? floatval($input['rating']) : null,
+            'labels' => isset($input['labels']) ? array_map('trim', explode(',', $input['labels'])) : []
+        ];
+        
+        // Save updated data
+        if (write_movies($json_file, $movies)) {
+            echo json_encode(['status' => 'success', 'message' => "Movie updated successfully."]);
+        } else {
+            http_response_code(500);
+            echo json_encode(['status' => 'error', 'message' => 'Failed to save movie data.']);
         }
         break;
 
